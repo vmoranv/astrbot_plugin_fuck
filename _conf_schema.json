@@ -1,0 +1,8 @@
+{
+    "threshold": {
+        "description": "匹配度阈值",
+        "type": "float",
+        "hint": "匹配度超过该值时，返回建议的命令",
+        "default": 0.6
+    }
+} 

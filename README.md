@@ -1,9 +1,35 @@
-# helloworld
+# AstrBot TheFuck 插件
 
-AstrBot 插件模板
+![@astrbot_plugin_fuck](https://count.getloli.com/get/@astrbot_plugin_fuck?theme=booru-lewd)
 
-A template plugin for AstrBot plugin feature
+一个为 AstrBot 设计的命令纠错插件，灵感来源于著名的命令行工具 `thefuck`。
 
-# 支持
+当你不小心输错了一个命令时（例如 `/pixic` 而不是 `/pixiv`），只需紧接着发送 `/fuck`，此插件就会尝试找出你可能想输入的正确命令，并给出建议。
+
+## 功能
+
+*   **监听消息**: 自动记录每个会话中用户发送的最后一条非 `/fuck` 消息。
+*   **命令发现**: 动态地从 AstrBot 加载的所有已激活插件中提取可用命令。
+    *   支持通过 `@filter.command` 装饰器注册的命令。
+    *   也支持将插件类中公开的方法名（非下划线开头）推断为命令（例如，一个名为 `pixiv` 的方法会被识别为 `/pixiv` 命令）。
+*   **模糊匹配**: 当收到 `/fuck` 命令时，使用 `difflib.SequenceMatcher` 比较上一条记录的命令与所有发现的命令，找出最相似的一个。
+*   **智能建议**: 如果找到的最高匹配度超过设定的阈值，插件会返回一个包含正确命令和原始参数的建议。
+
+## 配置
+
+可以在插件配置中调整以下参数 (`_conf_schema.json`):
+
+*   `threshold` (浮点数, 默认值: `0.6`):
+    *   描述: 匹配度阈值。
+    *   作用: 只有当计算出的命令相似度（0到1之间）大于或等于此阈值时，插件才会给出建议。较低的值会使建议更宽松（可能匹配到不太相关的命令），较高的值则要求更精确的匹配。
+
+## 使用示例
+
+1.  用户发送了一个错误的命令，比如: `/pixic 茉莉安`
+2.  用户紧接着发送: `/fuck`
+3.  如果 `/pixiv` 是一个已知的命令，并且 `/pixic` 和 `/pixiv` 的相似度高于配置的 `threshold`，机器人会回复: `你是不是想输入: /pixiv 茉莉安`
+4.  如果找不到足够相似的命令，机器人会回复: `未找到匹配的命令`
+
+## 支持
 
 [帮助文档](https://astrbot.app)
