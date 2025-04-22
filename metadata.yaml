@@ -1,5 +1,5 @@
 name: thefuck
-desc: 一个类似 thefuck 的插件 
-version: v1.0.0
+desc: 自动纠正输错的命令。当检测到可能的错误命令时，发送 /fuck 会收到修正建议，发送 Y 确认后将执行修正后的命令。
+version: v1.1.0
 author: vmoranv 
 repo: https://github.com/vmoranv/astrbot_plugin_fuck

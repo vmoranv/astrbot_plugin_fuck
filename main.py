@@ -1,12 +1,18 @@
-from astrbot.api.event import filter, AstrMessageEvent
+# 将 logger 导入移到最前面
+from astrbot.api import logger
+
+# 添加必要的 imports
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.event.filter import EventMessageType
 from astrbot.api.star import Context, Star, register
+from astrbot.api.platform import AstrBotMessage, PlatformMetadata, MessageMember # 修正 MessageMember 导入
+from astrbot.api.message_components import Plain # 从 message_components 只导入 Plain
 from difflib import SequenceMatcher
-from astrbot.api import logger
-import re # 导入 re 模块
+import uuid # 导入 uuid 模块
+import inspect # 导入 inspect 模块
 
 
-@register("thefuck", "vmoranv", "一个类似 thefuck 的插件", "1.0.0")
+@register("thefuck", "vmoranv", "一个类似 thefuck 的插件, 用于fuck错误命令并返回正确命令", "1.1.0")
 class TheFuckPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
@@ -14,6 +20,8 @@ class TheFuckPlugin(Star):
         self.threshold = self.config.get("threshold", 0.6)
         # 修改 last_messages 结构，存储元组 (command_part, full_message)
         self.last_messages: dict[str, tuple[str, str]] = {}
+        # 添加一个新的字典来存储建议的命令
+        self.suggested_commands: dict[str, str] = {}
 
     @filter.command("fuck")
     async def fuck_command(self, event: AstrMessageEvent):
@@ -45,9 +53,17 @@ class TheFuckPlugin(Star):
             # 组合建议的完整命令
             suggested_full_command = f"{corrected_command_base} {original_args}".strip() # strip() 避免没参数时末尾多空格
             logger.info(f"建议命令: {suggested_full_command}")
-            yield event.plain_result(f"你是不是想输入: {suggested_full_command}")
+            
+            # 存储建议的命令，以便后续使用
+            self.suggested_commands[session_id] = suggested_full_command
+            
+            # 返回建议，并提示用户可以输入Y/N确认
+            yield event.plain_result(f"你是不是想输入: {suggested_full_command}\n输入Y/N确认")
         else:
             logger.info("未找到足够相似的匹配命令")
+            # 清除之前的建议（如果有）
+            if session_id in self.suggested_commands:
+                del self.suggested_commands[session_id]
             yield event.plain_result("未找到匹配的命令")
 
     @filter.event_message_type(EventMessageType.ALL)
@@ -63,16 +79,119 @@ class TheFuckPlugin(Star):
         if not message_content:
             logger.debug("忽略空消息")
             return
+            
+        # 处理用户对建议命令的确认
+        if message_content.upper() == "Y" and session_id in self.suggested_commands:
+            suggested_cmd = self.suggested_commands[session_id]
+            logger.info(f"用户确认，尝试通过 platform.commit_event 提交伪造事件: '{suggested_cmd}'")
 
-        if not message_content.startswith('/fuck'):
-            # 按第一个空格分割命令和参数
+            # 清除建议
+            if session_id in self.suggested_commands:
+                 del self.suggested_commands[session_id]
+                 logger.debug(f"已清除会话 {session_id} 的建议命令缓存")
+
+            try:
+                # 1. 获取平台名称和适配器
+                platform_name = event.get_platform_name()
+                platform = self.context.get_platform(platform_name)
+                if not platform:
+                    logger.error("无法从事件中获取平台名称")
+                    yield event.plain_result("抱歉，内部错误，无法确定平台")
+                    return
+
+                # 2. 构造伪造的 AstrBotMessage
+                fake_message = AstrBotMessage()
+                fake_message.type = event.message_obj.type # 复制消息类型
+                fake_message.message_str = suggested_cmd # 核心：修正后的命令
+                # 构造发送者信息
+                sender_id = event.get_sender_id()
+                sender_name = event.get_sender_name()
+                if sender_id:
+                     fake_message.sender = MessageMember(user_id=sender_id, nickname=sender_name)
+                     logger.debug(f"构造伪造消息发送者: ID={sender_id}, Name={sender_name}")
+                else:
+                     logger.warning("无法获取原始事件的发送者 ID，伪造消息将缺少发送者信息")
+                fake_message.message = [Plain(text=suggested_cmd)] # 构造消息链
+                # 设置 raw_message - 保持与原始事件一致或简化
+                # 为了兼容性，最好复制原始 raw_message 并只修改必要部分
+                # 但如果原始 raw_message 结构复杂或未知，可以创建一个简化的
+                # 这里我们先尝试复制，如果 event.message_obj.raw_message 不可用则留空或简化
+                try:
+                    fake_message.raw_message = event.message_obj.raw_message
+                    # 如果需要修改 raw_message 中的内容，在这里进行
+                    # 例如: fake_message.raw_message['message'] = suggested_cmd
+                except AttributeError:
+                    logger.warning("原始事件的 message_obj 缺少 raw_message 属性，伪造消息的 raw_message 将为空")
+                    fake_message.raw_message = {} # 或者根据平台构造一个最小化的
+
+                fake_message.self_id = event.message_obj.self_id # 机器人自身 ID
+                fake_message.session_id = event.session_id # 保持原始会话 ID
+                # 添加 message_id
+                fake_message.message_id = str(uuid.uuid4()) # 生成唯一的 message_id
+                logger.debug(f"为伪造消息生成 message_id: {fake_message.message_id}")
+
+                # 3. 创建与原始事件相同类型的伪造事件实例
+                OriginalEventClass = event.__class__ # 获取原始事件的类
+                logger.debug(f"将创建类型为 {OriginalEventClass.__name__} 的伪造事件")
+
+                # 准备构造函数参数
+                kwargs = {
+                    "message_str": suggested_cmd,
+                    "message_obj": fake_message,
+                    "platform_meta": platform.meta(),
+                    "session_id": event.session_id,
+                }
+
+                # 检查原始事件类的 __init__ 是否接受 'bot' 参数
+                try:
+                    sig = inspect.signature(OriginalEventClass.__init__)
+                    if 'bot' in sig.parameters:
+                        logger.debug(f"{OriginalEventClass.__name__}.__init__ 接受 'bot' 参数，将传递 event.bot")
+                        kwargs['bot'] = event.bot
+                    else:
+                         logger.debug(f"{OriginalEventClass.__name__}.__init__ 不接受 'bot' 参数")
+                except ValueError:
+                    # 处理内置类型或无法获取签名的特殊情况 (虽然对于事件类不太可能)
+                    logger.warning(f"无法获取 {OriginalEventClass.__name__}.__init__ 的签名")
+                except Exception as inspect_err:
+                    logger.error(f"检查 {OriginalEventClass.__name__}.__init__ 签名时出错: {inspect_err}", exc_info=True)
+
+
+                # 使用获取到的类和准备好的参数创建实例
+                fake_event = OriginalEventClass(**kwargs)
+                logger.debug(f"成功创建伪造事件实例: {fake_event}")
+
+
+                # 4. 提交伪造事件
+                platform.commit_event(fake_event)
+                logger.info(f"已通过 platform.commit_event 成功提交伪造事件 '{suggested_cmd}'")
+
+            except AttributeError as ae:
+                 logger.error(f"获取平台或创建/提交伪造事件时出错 (AttributeError): {ae}", exc_info=True)
+                 yield event.plain_result(f"抱歉，处理确认时出错 (内部属性错误)")
+            except Exception as e:
+                # 捕获其他所有异常
+                logger.error(f"通过 platform.commit_event 提交伪造事件 '{suggested_cmd}' 时发生意外错误: {e}", exc_info=True)
+                yield event.plain_result(f"抱歉，尝试处理确认时发生意外错误: {e}")
+
+            # 处理完 'Y' 的逻辑后结束
+            return
+
+        elif message_content.upper() == "N" and session_id in self.suggested_commands:
+            # 用户拒绝，清除建议
+            logger.info("用户拒绝执行建议命令")
+            if session_id in self.suggested_commands: # 再次检查以防万一
+                 del self.suggested_commands[session_id]
+            yield event.plain_result("已取消")
+            return # 处理完 Y/N 后结束
+
+        if not message_content.startswith('/fuck') and message_content.upper() not in ["Y", "N"]:
             parts = message_content.split(' ', 1)
             command_part = parts[0]
-            # 存储命令部分和完整消息的元组
             logger.debug(f"为会话 {session_id} 存储命令部分: '{command_part}', 完整消息: '{message_content}'")
             self.last_messages[session_id] = (command_part, message_content)
-        else:
-            logger.debug(f"忽略 /fuck 命令消息: {message_content}")
+        elif message_content.startswith('/fuck'):
+            logger.debug(f"忽略 /fuck 命令消息，不更新 last_message: {message_content}")
 
     def get_all_commands(self) -> list:
         commands = []
