@@ -18,10 +18,23 @@ class TheFuckPlugin(Star):
         super().__init__(context)
         self.config = config
         self.threshold = self.config.get("threshold", 0.6)
-        # 修改 last_messages 结构，存储元组 (command_part, full_message)
-        self.last_messages: dict[str, tuple[str, str]] = {}
+        # 配置的唤醒前缀列表
+        self.wake_prefixes = self.config.get("wake_prefixes", ["/"])
+        # 修改 last_messages 结构，存储元组 (user_prefix, command_name_without_prefix, full_message)
+        self.last_messages: dict[str, tuple[str, str, str]] = {}
         # 添加一个新的字典来存储建议的命令
         self.suggested_commands: dict[str, str] = {}
+
+    def extract_prefix(self, message: str) -> tuple[str, str] | None:
+        """
+        从消息中提取前缀和不带前缀的命令名。
+        返回 (prefix, command_name_without_prefix) 或 None（如果未匹配任何前缀）
+        """
+        for prefix in self.wake_prefixes:
+            if message.startswith(prefix):
+                command_without_prefix = message[len(prefix):]
+                return (prefix, command_without_prefix)
+        return None
 
     @filter.command("fuck")
     async def fuck_command(self, event: AstrMessageEvent):
@@ -34,25 +47,25 @@ class TheFuckPlugin(Star):
             yield event.plain_result("未找到上一条消息")
             return
 
-        # 解包元组
-        last_command_part, last_full_message = stored_data
-        logger.debug(f"会话 {session_id} 的上一条命令部分: '{last_command_part}', 完整消息: '{last_full_message}'")
+        # 解包元组 (user_prefix, command_name_without_prefix, full_message)
+        user_prefix, last_command_name, last_full_message = stored_data
+        logger.debug(f"会话 {session_id} 的用户前缀: '{user_prefix}', 命令名: '{last_command_name}', 完整消息: '{last_full_message}'")
 
         commands = self.get_all_commands()
-        logger.debug(f"获取到的所有命令: {commands}")
-        # 使用命令部分进行匹配
-        best_match = self.find_best_match(last_command_part, commands)
-        logger.debug(f"命令部分 '{last_command_part}' 的最佳匹配: {best_match}")
+        logger.debug(f"获取到的所有命令（不带前缀）: {commands}")
+        # 使用不带前缀的命令名进行匹配
+        best_match = self.find_best_match(last_command_name, commands)
+        logger.debug(f"命令名 '{last_command_name}' 的最佳匹配: {best_match}")
 
         if best_match and best_match[1] >= self.threshold:
-            corrected_command_base = best_match[0] # 正确的命令，如 /pixiv
-            # 从原始完整消息中提取参数
+            corrected_command_name = best_match[0] # 正确的命令名（不带前缀），如 pixiv
+            # 从原始完整消息中提取参数（跳过前缀+命令部分）
             original_parts = last_full_message.split(' ', 1)
             original_args = original_parts[1] if len(original_parts) > 1 else ""
 
-            # 组合建议的完整命令
-            suggested_full_command = f"{corrected_command_base} {original_args}".strip() # strip() 避免没参数时末尾多空格
-            logger.info(f"建议命令: {suggested_full_command}")
+            # 使用用户的前缀组合建议的完整命令
+            suggested_full_command = f"{user_prefix}{corrected_command_name} {original_args}".strip()
+            logger.info(f"建议命令（使用用户前缀 '{user_prefix}'）: {suggested_full_command}")
             
             # 存储建议的命令，以便后续使用
             self.suggested_commands[session_id] = suggested_full_command
@@ -185,13 +198,32 @@ class TheFuckPlugin(Star):
             yield event.plain_result("已取消")
             return # 处理完 Y/N 后结束
 
-        if not message_content.startswith('/fuck') and message_content.upper() not in ["Y", "N"]:
-            parts = message_content.split(' ', 1)
-            command_part = parts[0]
-            logger.debug(f"为会话 {session_id} 存储命令部分: '{command_part}', 完整消息: '{message_content}'")
-            self.last_messages[session_id] = (command_part, message_content)
-        elif message_content.startswith('/fuck'):
-            logger.debug(f"忽略 /fuck 命令消息，不更新 last_message: {message_content}")
+        # 检查是否是 fuck 命令（任意前缀 + fuck）
+        is_fuck_command = False
+        for prefix in self.wake_prefixes:
+            if message_content.startswith(f"{prefix}fuck"):
+                is_fuck_command = True
+                break
+        
+        if not is_fuck_command and message_content.upper() not in ["Y", "N"]:
+            # 提取前缀和命令名
+            prefix_info = self.extract_prefix(message_content)
+            if prefix_info:
+                user_prefix, rest_of_message = prefix_info
+                # rest_of_message 可能是 "helk args" 或 "helk"
+                parts = rest_of_message.split(' ', 1)
+                command_name = parts[0]  # 不带前缀的命令名
+                logger.debug(f"为会话 {session_id} 存储: 前缀='{user_prefix}', 命令名='{command_name}', 完整消息='{message_content}'")
+                self.last_messages[session_id] = (user_prefix, command_name, message_content)
+            else:
+                # 如果没有匹配到任何前缀，仍然存储但使用默认前缀
+                parts = message_content.split(' ', 1)
+                command_part = parts[0]
+                default_prefix = self.wake_prefixes[0] if self.wake_prefixes else "/"
+                logger.debug(f"未匹配前缀，为会话 {session_id} 存储: 默认前缀='{default_prefix}', 命令部分='{command_part}', 完整消息='{message_content}'")
+                self.last_messages[session_id] = (default_prefix, command_part, message_content)
+        elif is_fuck_command:
+            logger.debug(f"忽略 fuck 命令消息，不更新 last_message: {message_content}")
 
     def get_all_commands(self) -> list:
         commands = []
@@ -250,16 +282,17 @@ class TheFuckPlugin(Star):
                             if command_names:
                                 found_by_decorator = True # 标记已找到
                                 if isinstance(command_names, (list, tuple)):
-                                    valid_cmds = [f"/{cmd}" for cmd in command_names if isinstance(cmd, str) and cmd.strip()]
+                                    # 不添加前缀，只保留命令名
+                                    valid_cmds = [cmd for cmd in command_names if isinstance(cmd, str) and cmd.strip()]
                                     if valid_cmds:
-                                        logger.info(f"      添加命令 (来自装饰器): {valid_cmds}")
+                                        logger.info(f"      添加命令（不带前缀）(来自装饰器): {valid_cmds}")
                                         commands.extend(valid_cmds)
                                     else:
                                         logger.info(f"      命令列表 {command_names} (来自装饰器) 中所有命令均为空或非字符串，已跳过")
                                 elif isinstance(command_names, str):
                                      if command_names.strip():
-                                         cmd_to_add = f"/{command_names.strip()}"
-                                         logger.info(f"      添加命令 (来自装饰器): ['{cmd_to_add}']")
+                                         cmd_to_add = command_names.strip()  # 不添加前缀
+                                         logger.info(f"      添加命令（不带前缀）(来自装饰器): ['{cmd_to_add}']")
                                          commands.append(cmd_to_add)
                                      else:
                                          logger.info(f"      单个命令字符串 '{command_names}' (来自装饰器) 为空，已跳过")
@@ -270,8 +303,8 @@ class TheFuckPlugin(Star):
 
                     # 如果没有通过装饰器找到，并且属性是可调用的，则假定方法名是命令
                     if not found_by_decorator and attr and callable(attr):
-                         assumed_cmd = f"/{attr_name}"
-                         logger.info(f"  检测到可调用公共属性 '{attr_name}'，假定为命令: {assumed_cmd}")
+                         assumed_cmd = attr_name  # 不添加前缀
+                         logger.info(f"  检测到可调用公共属性 '{attr_name}'，假定为命令（不带前缀）: {assumed_cmd}")
                          commands.append(assumed_cmd)
 
             except Exception as e:
@@ -279,14 +312,24 @@ class TheFuckPlugin(Star):
                 continue
 
         unique_commands = list(set(commands))
-        if "/fuck" in unique_commands:
-             logger.info("从最终列表中移除 /fuck 命令")
-             unique_commands.remove("/fuck")
+        if "fuck" in unique_commands:
+             logger.info("从最终列表中移除 fuck 命令")
+             unique_commands.remove("fuck")
 
-        logger.info(f"最终提取到的唯一命令列表 (包含推断): {unique_commands}")
+        logger.info(f"最终提取到的唯一命令列表（不带前缀）(包含推断): {unique_commands}")
         return unique_commands
 
-    def find_best_match(self, message: str, commands: list) -> tuple | None:
+    def find_best_match(self, command_name: str, commands: list) -> tuple | None:
+        """
+        查找最佳匹配的命令。
+        
+        Args:
+            command_name: 用户输入的命令名（不带前缀）
+            commands: 可用命令列表（不带前缀）
+        
+        Returns:
+            (matched_command, ratio) 或 None
+        """
         best_match = None
         best_ratio = 0
 
@@ -298,8 +341,8 @@ class TheFuckPlugin(Star):
             if not isinstance(cmd, str):
                 logger.warning(f"命令列表包含非字符串元素: {cmd}")
                 continue
-            # 确保匹配时比较的是纯命令部分
-            ratio = SequenceMatcher(None, message.split(' ', 1)[0], cmd).ratio()
+            # 直接比较不带前缀的命令名
+            ratio = SequenceMatcher(None, command_name, cmd).ratio()
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_match = (cmd, ratio)

@@ -4,5 +4,11 @@
         "type": "float",
         "hint": "匹配度超过该值时，返回建议的命令",
         "default": 0.6
+    },
+    "wake_prefixes": {
+        "description": "命令唤醒前缀列表",
+        "type": "list",
+        "hint": "用于识别命令的前缀，如 / 或 t 等",
+        "default": ["/"]
     }
-} 
+}
