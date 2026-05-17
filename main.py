@@ -11,8 +11,6 @@ from difflib import SequenceMatcher
 import uuid # 导入 uuid 模块
 import inspect # 导入 inspect 模块
 
-
-@register("thefuck", "vmoranv", "一个类似 thefuck 的插件, 用于fuck错误命令并返回正确命令", "1.1.0")
 class TheFuckPlugin(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
